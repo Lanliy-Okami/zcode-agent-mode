@@ -209,6 +209,24 @@ result = client.run_program(
 text = text_of(result)
 check("pending fallback shape", '"pending": true' in text and '"callId": true' in text, text[:300])
 
+# 6. Multi-line string literals survive BYTE-EXACT through run_code (regression:
+# the v0.3.0 textual-indent bootstrap corrupted triple-quoted YAML — every
+# continuation line gained 4 spaces, producing invalid workflow files).
+result = client.run_program(
+    'yaml = \"\"\"on:\n  push:\n    branches: [main]\"\"\"\n'
+    "value = await tools.write({\"file_path\": \"wf.yml\", \"content\": yaml})\n"
+    "readback = await tools.read({\"file_path\": \"wf.yml\"})\n"
+    "return {\"after\": value[\"after\"], \"lines\": [line[\"text\"] for line in readback[\"lines\"]]}\n",
+    "Write multi-line YAML through run_code",
+)
+text = text_of(result)
+check(
+    "multi-line string byte-exact (AST splice)",
+    '"after": "on:\\n  push:\\n    branches: [main]"' in text,
+    text[:400],
+)
+check("yaml lines exact, no phantom indent", '"    branches: [main]"' in text and '"        branches:' not in text, text[:400])
+
 client.close()
 
 # 6. WITH elicitation support: blocking ask returns DSH answers.

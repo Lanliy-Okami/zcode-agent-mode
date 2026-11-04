@@ -196,12 +196,31 @@ def main() -> int:
     }
 
     async def run() -> None:
-        body = program if program.strip() else "pass"
-        source = "async def __ptc_program__():\n" + "".join(
-            f"    {line}\n" for line in body.splitlines() or ["pass"]
-        )
+        # Compile the program as the body of an async function (DSH py/bootstrap.py
+        # step 6): AST-SPLICING the parsed body into an `async def` rewrites NO
+        # text, so multi-line string literals (triple-quoted YAML etc.) survive
+        # byte-exact, and every statement keeps its original line number for
+        # tracebacks. Modern CPython's ast.parse accepts module-level
+        # `return`/`await`, which is what makes the function-body contract work.
+        import ast
+
         try:
-            code_object = compile(source, "<run_code program>", "exec")
+            module = ast.parse(program, filename="<run_code program>")
+            wrapper = ast.AsyncFunctionDef(
+                name="__ptc_program__",
+                args=ast.arguments(
+                    posonlyargs=[], args=[], vararg=None,
+                    kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[],
+                ),
+                body=module.body or [ast.Pass()],
+                decorator_list=[],
+                returns=None,
+            )
+            anchor = module.body[0] if module.body else ast.parse("pass").body[0]
+            ast.copy_location(wrapper, anchor)
+            wrapped = ast.Module(body=[wrapper], type_ignores=[])
+            ast.fix_missing_locations(wrapped)
+            code_object = compile(wrapped, "<run_code program>", "exec", dont_inherit=True)
         except Exception:
             message = traceback.format_exception_only(*sys.exc_info()[:2])[-1].strip()
             _settle_error("exception", message)
