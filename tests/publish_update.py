@@ -85,7 +85,7 @@ def main() -> int:
     parent = api("GET", f"/repos/{OWNER}/{REPO_NAME}/git/commits/{parent_sha}")
     tree = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/trees", {"base_tree": parent["tree"]["sha"], "tree": tree_entries})
     commit = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/commits", {
-        "message": "v0.2.0: project configured ZCode MCP servers into run_code bindings (DSH-style SDK over MCP) — minimal MCP client (stdio + Streamable HTTP), cursor-paginated tools/list, fail-closed exclusive proxied calls, discovery cache surfaced by the UserPromptSubmit hook",
+        "message": "v0.2.1: keep AskUserQuestion directly callable in PTC/minimal modes (read-only client-UI interaction; an MCP binding cannot open the question dialog) — documented as a deliberate DSH deviation",
         "tree": tree["sha"],
         "parents": [parent_sha],
     })

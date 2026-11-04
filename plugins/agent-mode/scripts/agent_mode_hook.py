@@ -54,12 +54,20 @@ def is_mode_skill(tool_input: object) -> bool:
     return "agent-mode" in json.dumps(tool_input, ensure_ascii=False)
 
 
+# User-interaction tools stay directly callable: AskUserQuestion is a pure
+# read-only client-UI capability that no MCP binding can reach (an MCP server
+# cannot open ZCode's question dialog), so blocking it would only degrade UX.
+# Work still flows exclusively through run_code; this mirrors DSH's intent.
+DIRECT_INTERACTION_TOOLS = {"AskUserQuestion"}
+
+
 PTC_CONTEXT = (
     "[Agent Mode: PTC] `run_code` is the only tool you can call directly — a tool "
     "call naming any other tool fails. The harness exposes it as "
     f"`{RUN_CODE_TOOL}`. Reach every tool the SDK declares in the agent-mode:ptc-mode "
     "skill from inside the program as `await tools.name(args)`; only printed values "
-    "and the returned value become program output."
+    "and the returned value become program output. Exception: `AskUserQuestion` "
+    "stays directly callable for user interaction."
 )
 
 MAX_PROXIED_TOOLS_IN_CONTEXT = 40
@@ -193,6 +201,8 @@ def handle_pre_tool_use() -> None:
     mode = read_mode()
     if mode == "ptc":
         if not is_run_code(tool_name):
+            if tool_name in DIRECT_INTERACTION_TOOLS:
+                return
             if tool_name == "Skill" and is_mode_skill(tool_input):
                 return
             if tool_name in ("Read", "Write", "Edit") and is_state_file_path(tool_input):
@@ -201,6 +211,8 @@ def handle_pre_tool_use() -> None:
         return
     if mode == "minimal":
         if tool_name == "Bash":
+            return
+        if tool_name in DIRECT_INTERACTION_TOOLS:
             return
         if tool_name == "Skill" and is_mode_skill(tool_input):
             return

@@ -63,6 +63,12 @@ check("PTC exempts agent-mode Skill loads", proc.returncode == 0)
 proc = run_hook("pre-tool-use", {"tool_name": "Skill", "tool_input": {"skill": "other-plugin:skill"}}, "ptc")
 check("PTC denies unrelated Skill loads", proc.returncode == 2)
 
+proc = run_hook("pre-tool-use", {"tool_name": "AskUserQuestion", "tool_input": {"questions": []}}, "ptc")
+check("PTC exempts AskUserQuestion", proc.returncode == 0)
+
+proc = run_hook("pre-tool-use", {"tool_name": "AskUserQuestion", "tool_input": {}}, "minimal")
+check("minimal exempts AskUserQuestion", proc.returncode == 0)
+
 proc = run_hook("pre-tool-use", {"tool_name": "Write", "tool_input": {"file_path": r"C:\Users\x\.zcode\agent-mode.json", "content": "{}"}}, "ptc")
 check("PTC exempts state-file Write", proc.returncode == 0)
 
