@@ -5,8 +5,15 @@
         "hooks": [
           {
             "type": "process",
-            "command": "python",
-            "args": ["-X", "utf8", "-I", "${CLAUDE_PLUGIN_ROOT}/scripts/agent_mode_hook.py", "pre-tool-use"],
+            "command": "powershell.exe",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/run_hook.ps1",
+              "pre-tool-use"
+            ],
             "timeoutMs": 10000,
             "statusMessage": "Agent Mode policy check"
           }
@@ -18,8 +25,15 @@
         "hooks": [
           {
             "type": "process",
-            "command": "python",
-            "args": ["-X", "utf8", "-I", "${CLAUDE_PLUGIN_ROOT}/scripts/agent_mode_hook.py", "user-prompt-submit"],
+            "command": "powershell.exe",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/run_hook.ps1",
+              "user-prompt-submit"
+            ],
             "timeoutMs": 10000,
             "statusMessage": "Agent Mode context"
           }

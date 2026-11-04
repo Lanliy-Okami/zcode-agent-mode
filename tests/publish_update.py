@@ -85,7 +85,7 @@ def main() -> int:
     parent = api("GET", f"/repos/{OWNER}/{REPO_NAME}/git/commits/{parent_sha}")
     tree = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/trees", {"base_tree": parent["tree"]["sha"], "tree": tree_entries})
     commit = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/commits", {
-        "message": "v0.3.1: configurable runtime budgets for long builds (Rust CI probes etc.) — wall deadline, pwsh timeout cap, job wait cap, proxied MCP call timeout all env-overridable, defaults raised to 1 h per DSH's configuration-field semantics",
+        "message": "v0.3.4: fully timeout-free by default (0 = unlimited for wall deadline, shell, job waits, proxied MCP calls, ask_user_question, web_fetch sockets — every budget env-overridable) + PowerShell interpreter resolver (never the WindowsApps Store stub, cached, survives Python upgrades)",
         "tree": tree["sha"],
         "parents": [parent_sha],
     })

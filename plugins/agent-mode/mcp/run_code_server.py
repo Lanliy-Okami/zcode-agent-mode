@@ -59,15 +59,15 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# DSH Python runtime budgets are CONFIG fields (maxWallMs etc.); expose them as
-# environment overrides. Defaults raised beyond DSH's 600000 ms so long builds
-# (large Rust CI probes etc.) fit within one run_code call.
-MAX_WALL_MS = _env_int("AGENT_MODE_MAX_WALL_MS", 3600000)
+# DSH runtime budgets are CONFIG fields (maxWallMs etc.); this deployment runs
+# FULLY TIMEOUT-FREE by default: `0` means unlimited. Re-enable a deadline by
+# setting the variable (milliseconds).
+MAX_WALL_MS = _env_int("AGENT_MODE_MAX_WALL_MS", 0)
 MAX_VALUE_BYTES = 32768  # DSH Python runtime maxValueBytes default
 MAX_LOG_BYTES = 65536  # DSH Python runtime maxLogBytes default
 LOG_TRUNCATION_MARKER = "[dsh-ptc-runtime-python] log capture truncated at 65536 bytes"
-SHELL_DEFAULT_TIMEOUT_MS = 120000
-SHELL_MAX_TIMEOUT_MS = _env_int("AGENT_MODE_SHELL_MAX_TIMEOUT_MS", 3600000)
+SHELL_DEFAULT_TIMEOUT_MS = _env_int("AGENT_MODE_SHELL_DEFAULT_TIMEOUT_MS", 0)  # 0 = no timeout unless timeoutMs is passed
+SHELL_MAX_TIMEOUT_MS = _env_int("AGENT_MODE_SHELL_MAX_TIMEOUT_MS", 0)  # 0 = no cap
 SHELL_MAX_OUTPUT_CHARS = 16000
 READ_LIMIT = 2000
 READ_MAX_LINE_LENGTH = 2000
@@ -76,7 +76,7 @@ GLOB_MAX_RESULTS = 100
 GREP_MAX_MATCHES = 250
 GREP_MAX_LINE_BYTES = 2000
 FETCH_MAX_OUTPUT_CHARS = 200000
-FETCH_TIMEOUT_S = 60
+FETCH_TIMEOUT_S = _env_int("AGENT_MODE_FETCH_TIMEOUT_S", 0)  # 0 = no socket timeout
 
 RUN_CODE_TOOL = "run_code"
 
@@ -169,12 +169,14 @@ def _tool_pwsh(args: dict) -> dict:
     if run_in_background:
         job = _start_shell_job(command, description, cwd, shell)
         return {"kind": "background", "cwd": cwd, "jobId": job.id}
-    timeout_ms = args.get("timeoutMs", SHELL_DEFAULT_TIMEOUT_MS)
-    if not isinstance(timeout_ms, (int, float)) or timeout_ms <= 0:
-        timeout_ms = SHELL_DEFAULT_TIMEOUT_MS
-    timeout_ms = min(timeout_ms, SHELL_MAX_TIMEOUT_MS)
+    # Timeout resolution: timeoutMs argument, else the configured default; 0 = unlimited.
+    raw_timeout = args.get("timeoutMs")
+    timeout_ms = raw_timeout if isinstance(raw_timeout, (int, float)) and raw_timeout > 0 else SHELL_DEFAULT_TIMEOUT_MS
+    if timeout_ms and SHELL_MAX_TIMEOUT_MS > 0:
+        timeout_ms = min(timeout_ms, SHELL_MAX_TIMEOUT_MS)
     # Popen + bounded wait so a timeout can PROMOTE to a background job
     # (DSH tool-bash promoteOnTimeout: default true) instead of being killed.
+    # With no timeout configured the wait is unbounded.
     process = subprocess.Popen(
         [shell, "-NoProfile", "-NonInteractive", "-Command", command],
         stdout=subprocess.PIPE,
@@ -183,7 +185,7 @@ def _tool_pwsh(args: dict) -> dict:
     )
     job = _Job(kind="pwsh", label=description, process=process)
     _start_job_pumps(job)
-    timed_out = not job.done_event.wait(timeout_ms / 1000.0)
+    timed_out = not (job.done_event.wait() if not timeout_ms else job.done_event.wait(timeout_ms / 1000.0))
     if timed_out:
         _register_job(job)
         partial = job.snapshot_output()[0]
@@ -211,8 +213,8 @@ def _tool_pwsh(args: dict) -> dict:
 
 # ---------------------------------------------------------------- jobs (DSH tool-jobs)
 
-JOB_WAIT_DEFAULT_MS = 30000
-JOB_WAIT_MAX_MS = _env_int("AGENT_MODE_JOB_WAIT_MAX_MS", 3600000)
+JOB_WAIT_DEFAULT_MS = _env_int("AGENT_MODE_JOB_WAIT_DEFAULT_MS", 0)  # 0 = wait indefinitely
+JOB_WAIT_MAX_MS = _env_int("AGENT_MODE_JOB_WAIT_MAX_MS", 0)  # 0 = no cap
 
 
 class _Job:
@@ -338,11 +340,15 @@ def _tool_job_output(args: dict) -> dict:
         raise ToolFailure("job_output failed: invalid job_id: expected a non-empty string")
     job = _get_job(job_id)
     if args.get("wait"):
-        timeout_ms = args.get("timeout_ms", JOB_WAIT_DEFAULT_MS)
-        if not isinstance(timeout_ms, (int, float)) or timeout_ms <= 0:
-            timeout_ms = JOB_WAIT_DEFAULT_MS
-        timeout_ms = min(timeout_ms, JOB_WAIT_MAX_MS)
-        job.done_event.wait(timeout_ms / 1000.0)
+        # timeout_ms argument, else the configured default; 0 = wait indefinitely.
+        raw = args.get("timeout_ms")
+        timeout_ms = raw if isinstance(raw, (int, float)) and raw > 0 else JOB_WAIT_DEFAULT_MS
+        if timeout_ms and JOB_WAIT_MAX_MS > 0:
+            timeout_ms = min(timeout_ms, JOB_WAIT_MAX_MS)
+        if timeout_ms:
+            job.done_event.wait(timeout_ms / 1000.0)
+        else:
+            job.done_event.wait()
         # DSH: a timed-out wait returns job state, not a timeout error.
     text = job.since_cursor()
     return {"text": text if text else "(no new output)", "job": job.public()}
@@ -644,7 +650,7 @@ def _tool_web_fetch(args: dict) -> dict:
         raise ToolFailure("web_fetch failed: only http(s) URLs are supported")
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Agent Mode PTC)"})
     try:
-        with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_S) as response:
+        with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_S if FETCH_TIMEOUT_S > 0 else None) as response:
             status_code = response.status
             content_type = (response.headers.get("Content-Type") or "").lower()
             payload = response.read(FETCH_MAX_OUTPUT_CHARS + 1)
@@ -674,7 +680,7 @@ STDOUT_LOCK = threading.Lock()
 CLIENT_SUPPORTS_ELICITATION = False
 CLIENT_SUPPORTS_SAMPLING = False
 
-ELICITATION_CALL_TIMEOUT_S = 600
+ELICITATION_CALL_TIMEOUT_S = _env_int("AGENT_MODE_ASK_TIMEOUT_S", 0)  # 0 = block until the user answers (DSH legacy semantics)
 
 # DSH timed-mode pending message (packages/interaction/tool-ask-user/src/timed.ts),
 # used verbatim when the client cannot elicit and the binding degrades to pending.
@@ -707,7 +713,7 @@ def send_client_request(method: str, params: dict, timeout_s: float) -> dict:
         except OSError as error:
             _pending_events.pop(request_id, None)
             raise RuntimeError(f"transport write failed: {error}") from None
-    if not event.wait(timeout_s):
+    if not (event.wait() if not timeout_s or timeout_s <= 0 else event.wait(timeout_s)):
         _pending_events.pop(request_id, None)
         raise RuntimeError(f"no response to {method} within {timeout_s:g}s")
     with STDOUT_LOCK:
@@ -1069,7 +1075,39 @@ def execute_program(code: str) -> dict:
         ]
         for thread in threads:
             thread.start()
-        settle_deadline_reached = not run.done_event.wait(MAX_WALL_MS / 1000.0)
+        # Wall deadline: 0 (default) runs fully timeout-free; a positive
+        # AGENT_MODE_MAX_WALL_MS re-enables DSH's maxWallMs behavior. In the
+        # unlimited case the pumps' EOF still detects interpreter death
+        # (worker-exit), so a crashed child never wedges the transport.
+        if MAX_WALL_MS > 0:
+            settle_deadline_reached = not run.done_event.wait(MAX_WALL_MS / 1000.0)
+            for thread in threads:
+                thread.join(timeout=2.0)
+        else:
+            settle_deadline_reached = False
+
+            def _unlimited_watch() -> None:
+                # EOF on every pump with no done frame: the interpreter died.
+                for thread in threads:
+                    thread.join()
+                if run.done is None:
+                    try:
+                        run.process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    run.done = {
+                        "type": "done",
+                        "error": {
+                            "kind": "worker-exit",
+                            "message": f"the interpreter exited with code {run.process.returncode} before settling",
+                        },
+                    }
+                    run.done_event.set()
+
+            threading.Thread(target=_unlimited_watch, daemon=True).start()
+            run.done_event.wait()  # fully timeout-free: done frame or death detection
+            for thread in threads:
+                thread.join(timeout=2.0)  # grace drain only
         # Let the pump threads finish reading before tearing the pipes down.
         for thread in threads:
             thread.join(timeout=2.0)

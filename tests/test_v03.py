@@ -227,6 +227,16 @@ check(
 )
 check("yaml lines exact, no phantom indent", '"    branches: [main]"' in text and '"        branches:' not in text, text[:400])
 
+# 7. Fully timeout-free defaults: a slow foreground pwsh completes without any
+# timeoutMs (the 0 = unlimited configuration), and no wall deadline interferes.
+result = client.run_program(
+    "value = await tools.pwsh({\"command\": \"Start-Sleep -Seconds 3; Write-Output late-ok\", \"description\": \"Slow foreground\"})\n"
+    "return {\"text\": value[\"stdout\"][\"text\"].strip(), \"timedOut\": value[\"timedOut\"], \"kind\": value[\"kind\"]}\n",
+    "Slow foreground under timeout-free config",
+)
+text = text_of(result)
+check("timeout-free foreground pwsh completes", "late-ok" in text and '"timedOut": false' in text and '"kind": "foreground"' in text, text[:300])
+
 client.close()
 
 # 6. WITH elicitation support: blocking ask returns DSH answers.

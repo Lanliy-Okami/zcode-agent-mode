@@ -22,14 +22,19 @@ Mode lives in `%USERPROFILE%\.zcode\agent-mode.json` as `{"mode": "ptc" | "minim
 
 ## Budget configuration (environment variables)
 
-DSH's runtime budgets are configuration; the plugin exposes them as env vars (defaults raised beyond DSH's 600000 ms so long builds fit in one `run_code` call):
+This deployment runs **fully timeout-free by default** (`0 = unlimited`) — DSH's runtime budgets are configuration fields, and every one is exposed as an env variable. Set any to a positive value to re-enable that deadline:
 
 | Variable | Default | Controls |
 |---|---|---|
-| `AGENT_MODE_MAX_WALL_MS` | 3600000 (1 h) | run_code program wall deadline |
-| `AGENT_MODE_SHELL_MAX_TIMEOUT_MS` | 3600000 | pwsh timeoutMs cap |
-| `AGENT_MODE_JOB_WAIT_MAX_MS` | 3600000 | job_output wait cap |
-| `AGENT_MODE_MCP_CALL_TIMEOUT_S` | 600 | proxied MCP tools/call timeout |
+| `AGENT_MODE_MAX_WALL_MS` | 0 (unlimited) | run_code program wall deadline |
+| `AGENT_MODE_SHELL_DEFAULT_TIMEOUT_MS` | 0 (unlimited) | pwsh timeout when `timeoutMs` is omitted |
+| `AGENT_MODE_SHELL_MAX_TIMEOUT_MS` | 0 (no cap) | pwsh timeoutMs cap (explicit timeouts still PROMOTE to a background job on expiry) |
+| `AGENT_MODE_JOB_WAIT_DEFAULT_MS` / `AGENT_MODE_JOB_WAIT_MAX_MS` | 0 (unlimited) | job_output wait |
+| `AGENT_MODE_MCP_CALL_TIMEOUT_S` | 0 (unlimited) | proxied MCP tools/call |
+| `AGENT_MODE_ASK_TIMEOUT_S` | 0 (unlimited) | ask_user_question elicitation wait (DSH legacy semantics: block until answered) |
+| `AGENT_MODE_FETCH_TIMEOUT_S` | 0 (no socket timeout) | web_fetch HTTP socket |
+
+Not affected (not timeouts): log/value byte budgets, `maxParallelSubCalls`, MCP discovery (15 s per server, so a broken server cannot wedge every program).
 
 ## Tests (development host)
 

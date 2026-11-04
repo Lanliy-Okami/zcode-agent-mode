@@ -41,7 +41,7 @@ for key in ("skills", "commands", "hooks", "mcpServers"):
 # Resource internals.
 mcp = json.loads(io.open(os.path.join(PLUGIN, ".mcp.json"), encoding="utf-8").read())
 server = mcp["mcpServers"]["agent-mode"]
-check("mcp server command is python", server["command"] == "python")
+check("mcp server launches via PowerShell resolver", server["command"] == "powershell.exe" and any("run_server.ps1" in a for a in server["args"]))
 check("mcp args reference plugin root token", any("${CLAUDE_PLUGIN_ROOT}" in a for a in server["args"]))
 check("mcp cwd anchored to project", server["cwd"] == "${CLAUDE_PROJECT_DIR}")
 

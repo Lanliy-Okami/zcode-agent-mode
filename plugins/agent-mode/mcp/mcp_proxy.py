@@ -41,9 +41,9 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# DSH budgets are configuration; long proxied MCP calls (CI builds via remote
-# servers etc.) get a generous, env-overridable default.
-CALL_TIMEOUT_S = _env_int("AGENT_MODE_MCP_CALL_TIMEOUT_S", 600)
+# DSH budgets are configuration; 0 = fully timeout-free (default): proxied MCP
+# calls wait indefinitely. Set AGENT_MODE_MCP_CALL_TIMEOUT_S to re-enable.
+CALL_TIMEOUT_S = _env_int("AGENT_MODE_MCP_CALL_TIMEOUT_S", 0)
 CACHE_TTL_S = 600
 MAX_TOOLS_PER_SERVER = 100
 MAX_TOOLS_PER_SERVER_TOTAL = 300  # paginate up to this many tools per server
@@ -97,8 +97,8 @@ class _StdioConnection:
             self._process.stdin.flush()
         except OSError as error:
             raise _JsonRpcError(f"stdio write failed: {error}") from None
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
+        deadline = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
+        while deadline is None or time.monotonic() < deadline:
             line = self._process.stdout.readline()
             if not line:
                 raise _JsonRpcError("stdio server closed the stream")
@@ -162,7 +162,7 @@ class _HttpConnection:
             headers["Mcp-Session-Id"] = self._session
         request = urllib.request.Request(self._url, data=data, method="POST", headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=CALL_TIMEOUT_S) as response:
+            with urllib.request.urlopen(request, timeout=CALL_TIMEOUT_S if CALL_TIMEOUT_S > 0 else None) as response:
                 session_id = response.headers.get("Mcp-Session-Id")
                 if session_id:
                     self._session = session_id

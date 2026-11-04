@@ -1,8 +1,14 @@
 {
   "mcpServers": {
     "agent-mode": {
-      "command": "python",
-      "args": ["-X", "utf8", "-I", "${CLAUDE_PLUGIN_ROOT}/mcp/run_code_server.py"],
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${CLAUDE_PLUGIN_ROOT}/scripts/run_server.ps1"
+      ],
       "cwd": "${CLAUDE_PROJECT_DIR}",
       "env": {
         "PYTHONUTF8": "1",

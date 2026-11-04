@@ -199,8 +199,21 @@ check("grep binding", '"n": 1' in text and "beta2" in text, text)
 
 client.close()
 
-# 10. Mode gate: without a ptc state file the tool refuses.
-client_off = Client(None)
+# 10. Mode gate: without a ptc state file the tool refuses (explicit normal state
+# file keeps this deterministic against the user's live global file).
+OFF_STATE = os.path.join(WORKSPACE, "off-state.json")
+with io.open(OFF_STATE, "w", encoding="utf-8") as handle:
+    json.dump({"mode": "normal"}, handle)
+env_off = dict(os.environ)
+env_off["PYTHONUTF8"] = "1"
+env_off["AGENT_MODE_STATE_FILE"] = OFF_STATE
+client_off = Client.__new__(Client)
+client_off.process = subprocess.Popen(
+    [sys.executable, "-X", "utf8", "-I", SERVER],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    cwd=WORKSPACE, env=env_off,
+)
+client_off.next_id = 0
 result = client_off.call_tool("run_code", {"code": "return 1\n", "description": "Gate check"})
 text = text_of(result)
 check("mode gate refuses without ptc state", result.get("isError") is True and "/agent-mode:ptc" in text, text[:200])
