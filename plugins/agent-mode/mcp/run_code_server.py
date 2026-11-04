@@ -42,6 +42,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tool_schemas  # noqa: E402
+import mcp_proxy  # noqa: E402
 
 SERVER_NAME = "agent-mode"
 SERVER_VERSION = "0.1.0"
@@ -483,25 +484,34 @@ class ProgramRun:
     def dispatch(self, call_id: Any, name: str, args: Any) -> None:
         def run() -> None:
             try:
-                tool = REGISTRY.get(name)
-                if tool is None:
-                    raise ToolFailure(f"unknown tool binding: {name}")
                 call_args = args if isinstance(args, dict) else {}
+                tool = REGISTRY.get(name)
+                if tool is not None:
+                    def invoke():
+                        if isinstance(tool, _AsyncTool):
+                            return tool.call(call_args)
+                        return tool(call_args)
 
-                def invoke():
-                    if isinstance(tool, _AsyncTool):
-                        return tool.call(call_args)
-                    return tool(call_args)
-
-                # DSH native concurrency contract: mutating calls run alone, in
-                # submission order; safe calls may overlap, capped at maxParallel.
-                if name in EXCLUSIVE_TOOLS:
-                    with self.exclusive_lock:
+                    # DSH native concurrency contract: mutating calls run alone, in
+                    # submission order; safe calls may overlap, capped at maxParallel.
+                    if name in EXCLUSIVE_TOOLS:
+                        with self.exclusive_lock:
+                            with self.parallel_semaphore:
+                                value = invoke()
+                    else:
                         with self.parallel_semaphore:
                             value = invoke()
+                elif name in mcp_proxy.PROXY.tools:
+                    # Fail-closed exclusive (DSH's classification for undeclared
+                    # execution modes): proxied MCP calls run alone, in order.
+                    with self.exclusive_lock:
+                        with self.parallel_semaphore:
+                            value = mcp_proxy.PROXY.call(name, call_args)
                 else:
-                    with self.parallel_semaphore:
-                        value = invoke()
+                    raise ToolFailure(
+                        f"unknown tool binding: {name} — it is not part of the PTC registry "
+                        "(the built-in SDK plus this session's projected MCP bindings)"
+                    )
                 self.send_reply(call_id, True, value=value)
             except ToolFailure as error:
                 self.send_reply(call_id, False, error=str(error))
@@ -587,6 +597,13 @@ def execute_program(code: str) -> dict:
     Returns the DSH canonical run_code output: {logs, result?, sandbox}.
     Raises CodeRunFailed on program failure.
     """
+    # Project the session's MCP servers into bindings before the program runs
+    # (DSH binds every agent-visible tool, MCP tools included). A discovery
+    # failure must never fail the program: the registry just stays smaller.
+    try:
+        mcp_proxy.PROXY.discover()
+    except Exception as error:
+        mcp_proxy.PROXY.notes.append(mcp_proxy.ProxyNote("(discovery)", f"{type(error).__name__}: {error}"))
     run = ProgramRun()
     parent_sock, child_sock = socket.socketpair()
     spawn_env = {

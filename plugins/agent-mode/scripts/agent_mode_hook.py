@@ -62,6 +62,47 @@ PTC_CONTEXT = (
     "and the returned value become program output."
 )
 
+MAX_PROXIED_TOOLS_IN_CONTEXT = 40
+
+
+def _proxy_bindings_context() -> str:
+    """Summarize the projected MCP bindings (written by the run_code server)."""
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    cache = os.path.join(home, ".zcode", "agent-mode-mcp-tools.json")
+    try:
+        with io.open(cache, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    tools = data.get("tools") if isinstance(data, dict) else None
+    if not isinstance(tools, list) or not tools:
+        return ""
+    lines = []
+    for tool in tools[:MAX_PROXIED_TOOLS_IN_CONTEXT]:
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name")
+        if not isinstance(name, str):
+            continue
+        description = tool.get("description") if isinstance(tool.get("description"), str) else ""
+        required = tool.get("required") if isinstance(tool.get("required"), list) else []
+        args_hint = ", ".join(f"{k}*" for k in required)
+        suffix = f" ({args_hint})" if args_hint else ""
+        suffix += f" — {description}" if description else ""
+        lines.append(f"- `await tools.{name}({{...}})`{suffix}")
+    if not lines:
+        return ""
+    more = len(tools) - len(lines)
+    body = "\n".join(lines)
+    if more > 0:
+        body += f"\n- …and {more} more (see ~/.zcode/agent-mode-mcp-tools.json)"
+    return (
+        "\n\n[PTC projected MCP bindings] Beyond the built-in SDK (pwsh, read, write, edit, "
+        "glob, grep, web_fetch), these tools from your ZCode MCP servers are callable inside "
+        "run_code programs (fail-closed exclusive, like DSH's undeclared tools):"
+        f"\n{body}"
+    )
+
 MINIMAL_CONTEXT = (
     "[Agent Mode: minimal] You are a helpful software engineer assistant. The minimal "
     "preset exposes only the persistent shell plus image reading: use the shell (Bash) "
@@ -174,7 +215,7 @@ def handle_pre_tool_use() -> None:
 def handle_user_prompt_submit() -> None:
     mode = read_mode()
     if mode == "ptc":
-        context = PTC_CONTEXT
+        context = PTC_CONTEXT + _proxy_bindings_context()
     elif mode == "minimal":
         context = MINIMAL_CONTEXT
     else:

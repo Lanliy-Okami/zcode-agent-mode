@@ -85,7 +85,7 @@ def main() -> int:
     parent = api("GET", f"/repos/{OWNER}/{REPO_NAME}/git/commits/{parent_sha}")
     tree = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/trees", {"base_tree": parent["tree"]["sha"], "tree": tree_entries})
     commit = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/commits", {
-        "message": "v0.1.1: fix the PTC mode-switch deadlock — accept ZCode's plugin-prefixed run_code name (mcp__plugin_agent-mode_agent-mode__run_code), exempt agent-mode Skill loads, load briefings before enforcement",
+        "message": "v0.2.0: project configured ZCode MCP servers into run_code bindings (DSH-style SDK over MCP) — minimal MCP client (stdio + Streamable HTTP), cursor-paginated tools/list, fail-closed exclusive proxied calls, discovery cache surfaced by the UserPromptSubmit hook",
         "tree": tree["sha"],
         "parents": [parent_sha],
     })
