@@ -1,0 +1,14 @@
+---
+description: Switch the session to Agent Mode minimal mode (DSH minimal preset: persistent shell only)
+argument-hint: (optional: what to do next in minimal mode)
+---
+
+Switch this session into **minimal mode** (the DeepSeek Harness agent preset `minimal`).
+
+Perform these steps in order:
+
+1. Create the state file `%USERPROFILE%\.zcode\agent-mode.json` (create the `.zcode` directory if missing) containing exactly `{"mode": "minimal"}` — use the Write tool on that absolute path. This activates the enforcement hook.
+2. Invoke the Skill tool with skill `agent-mode:minimal-mode` to load the minimal briefing.
+3. Reply with one short sentence confirming that minimal mode is active: only the persistent shell (Bash) plus image reads remain available.
+
+If `$ARGUMENTS` contains a task, begin executing it in minimal mode after the confirmation.

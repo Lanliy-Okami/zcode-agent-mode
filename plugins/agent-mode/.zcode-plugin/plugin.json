@@ -1,0 +1,11 @@
+{
+  "name": "agent-mode",
+  "version": "0.1.0",
+  "description": "Ports the DeepSeek Harness (DSH) agent presets to ZCode: PTC mode (programmatic tool calling through a single run_code tool with a generated Python SDK) and minimal mode (persistent-shell-only assistant with file tools disabled), with DSH-identical prompts, errors and enforcement.",
+  "author": { "name": "Agent Mode" },
+  "license": "MIT",
+  "skills": "skills",
+  "commands": "commands",
+  "hooks": "hooks/hooks.json",
+  "mcpServers": ".mcp.json"
+}
