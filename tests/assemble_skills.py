@@ -19,7 +19,7 @@ description: DeepSeek Harness (DSH) agent preset "ptc" mode for ZCode — progra
 
 `run_code` is the only tool you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.
 
-ZCode exposes the reserved transport as **`mcp__agent-mode__run_code`**. A direct call to any other tool is rejected before policy with: `only \\`run_code\\` is callable directly — call \\`<name>\\` from inside a \\`run_code\\` program instead`.
+ZCode exposes the reserved transport as **`mcp__plugin_agent-mode_agent-mode__run_code`** (plugin-prefixed MCP naming). A direct call to any other tool is rejected before policy with: `only \\`run_code\\` is callable directly — call \\`<name>\\` from inside a \\`run_code\\` program instead`.
 
 ## Transport contract
 

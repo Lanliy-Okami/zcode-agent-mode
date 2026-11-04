@@ -8,7 +8,7 @@ import os
 import sys
 
 PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "agent-mode")
-MARKET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "marketplace.json")
+MARKET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "marketplace.json")
 
 failures: list[str] = []
 
@@ -24,7 +24,7 @@ manifest = json.loads(io.open(manifest_path, encoding="utf-8").read())
 name = manifest["name"]
 check("manifest name matches directory", name == os.path.basename(os.path.normpath(PLUGIN)))
 check("name matches ^[a-z0-9][a-z0-9._-]{0,127}$", bool(__import__("re").fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", name)))
-check("version is semantic 0.1.0", manifest["version"] == "0.1.0")
+check("version is semantic", bool(__import__("re").fullmatch(r"\d+\.\d+\.\d+", manifest["version"])), manifest["version"])
 
 for key, expected in (("skills", "skills"), ("commands", "commands"), ("hooks", "hooks/hooks.json"), ("mcpServers", ".mcp.json")):
     declared = manifest.get(key)
@@ -67,7 +67,7 @@ for command in ("ptc", "minimal", "normal"):
 # Marketplace catalog agreement.
 catalog = json.loads(io.open(MARKET, encoding="utf-8").read())
 entry = next(p for p in catalog["plugins"] if p["name"] == name)
-check("catalog source matches plugin dir", entry["source"] == f"./{name}")
+check("catalog source matches plugin dir", entry["source"] == f"./plugins/{name}")
 check("catalog version matches manifest", entry["version"] == manifest["version"])
 check("catalog description matches manifest", entry["description"] == manifest["description"])
 check("catalog has zh display metadata", "zh-CN" in entry.get("displayName_i18n", {}))

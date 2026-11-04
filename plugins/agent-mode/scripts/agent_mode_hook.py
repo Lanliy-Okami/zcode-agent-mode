@@ -31,7 +31,28 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 PTC_DENY = "only `run_code` is callable directly — call `{name}` from inside a `run_code` program instead"
 
 # Zcode-side name of the reserved run_code transport provided by this plugin.
-RUN_CODE_TOOL = "mcp__agent-mode__run_code"
+# Zcode prefixes plugin MCP tools as mcp__plugin_<plugin>_<server>__<tool>, so the
+# observed name is mcp__plugin_agent-mode_agent-mode__run_code; the checker below
+# also accepts the bare server form and any agent-mode-prefixed variant.
+RUN_CODE_TOOL = "mcp__plugin_agent-mode_agent-mode__run_code"
+
+
+def is_run_code(tool_name: str) -> bool:
+    if tool_name.endswith("__run_code") and "agent-mode" in tool_name:
+        return True
+    return tool_name == "mcp__agent-mode__run_code"
+
+
+def is_mode_skill(tool_input: object) -> bool:
+    """True when the Skill call loads one of this plugin's mode briefings.
+
+    These briefings are the port's analog of DSH's harness-owned prompt sections,
+    so loading one must stay reachable from inside any mode.
+    """
+    if not isinstance(tool_input, dict):
+        return False
+    return "agent-mode" in json.dumps(tool_input, ensure_ascii=False)
+
 
 PTC_CONTEXT = (
     "[Agent Mode: PTC] `run_code` is the only tool you can call directly — a tool "
@@ -130,13 +151,17 @@ def handle_pre_tool_use() -> None:
 
     mode = read_mode()
     if mode == "ptc":
-        if tool_name != RUN_CODE_TOOL:
+        if not is_run_code(tool_name):
+            if tool_name == "Skill" and is_mode_skill(tool_input):
+                return
             if tool_name in ("Read", "Write", "Edit") and is_state_file_path(tool_input):
                 return
             deny(PTC_DENY.format(name=tool_name))
         return
     if mode == "minimal":
         if tool_name == "Bash":
+            return
+        if tool_name == "Skill" and is_mode_skill(tool_input):
             return
         if tool_name == "Read" and (is_image_read(tool_input) or is_state_file_path(tool_input)):
             return

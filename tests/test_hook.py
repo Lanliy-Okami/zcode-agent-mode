@@ -51,8 +51,17 @@ check(
     proc.stderr.decode("utf-8"),
 )
 
+proc = run_hook("pre-tool-use", {"tool_name": "mcp__plugin_agent-mode_agent-mode__run_code", "tool_input": {}}, "ptc")
+check("PTC allows plugin-prefixed run_code", proc.returncode == 0)
+
 proc = run_hook("pre-tool-use", {"tool_name": "mcp__agent-mode__run_code", "tool_input": {}}, "ptc")
-check("PTC allows run_code", proc.returncode == 0)
+check("PTC allows bare-prefixed run_code (back-compat)", proc.returncode == 0)
+
+proc = run_hook("pre-tool-use", {"tool_name": "Skill", "tool_input": {"skill": "agent-mode:ptc-mode"}}, "ptc")
+check("PTC exempts agent-mode Skill loads", proc.returncode == 0)
+
+proc = run_hook("pre-tool-use", {"tool_name": "Skill", "tool_input": {"skill": "other-plugin:skill"}}, "ptc")
+check("PTC denies unrelated Skill loads", proc.returncode == 2)
 
 proc = run_hook("pre-tool-use", {"tool_name": "Write", "tool_input": {"file_path": r"C:\Users\x\.zcode\agent-mode.json", "content": "{}"}}, "ptc")
 check("PTC exempts state-file Write", proc.returncode == 0)
@@ -76,8 +85,11 @@ check("minimal denies Write", proc.returncode == 2)
 proc = run_hook("pre-tool-use", {"tool_name": "Grep", "tool_input": {}}, "minimal")
 check("minimal denies Grep", proc.returncode == 2)
 
-proc = run_hook("pre-tool-use", {"tool_name": "mcp__agent-mode__run_code", "tool_input": {}}, "minimal")
+proc = run_hook("pre-tool-use", {"tool_name": "mcp__plugin_agent-mode_agent-mode__run_code", "tool_input": {}}, "minimal")
 check("minimal denies run_code", proc.returncode == 2)
+
+proc = run_hook("pre-tool-use", {"tool_name": "Skill", "tool_input": {"skill": "agent-mode:minimal-mode"}}, "minimal")
+check("minimal exempts agent-mode Skill loads", proc.returncode == 0)
 
 proc = run_hook("pre-tool-use", {"tool_name": "Read", "tool_input": {"file_path": r"C:\Users\demo\.zcode\agent-mode.json"}}, "minimal")
 check("minimal exempts state-file Read", proc.returncode == 0)

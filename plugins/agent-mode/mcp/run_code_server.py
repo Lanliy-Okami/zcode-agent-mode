@@ -5,7 +5,8 @@ Ports the model-visible contract of the DeepSeek Harness PTC executor
 (packages/core/tool-executor-ptc) + Python PTC runtime
 (packages/experimental/ptc-runtime-python) to a ZCode MCP server:
 
-- A single reserved tool `run_code` (exposed by ZCode as `mcp__agent-mode__run_code`).
+- A single reserved tool `run_code` (exposed by ZCode as
+  `mcp__plugin_agent-mode_agent-mode__run_code`).
   Its description, parameter descriptions, and escalation guidance are assembled
   exactly as ptc.ts does for the Python flavor.
 - Each call spawns a FRESH CPython subprocess running ptc_bootstrap.py: the program

@@ -11,7 +11,7 @@ English | [中文](#中文)
 
 | Mode | Command | Effect |
 |---|---|---|
-| **PTC mode** | `/agent-mode:ptc` | Only `run_code` (exposed as `mcp__agent-mode__run_code`) is directly callable. A direct call to any other tool is rejected before policy with DSH's verbatim message: `only \`run_code\` is callable directly — call \`<name>\` from inside a \`run_code\` program instead`. Work happens inside Python programs that call the generated SDK (`await tools.name(args)`); only printed/returned values enter the conversation. |
+| **PTC mode** | `/agent-mode:ptc` | Only `run_code` (exposed as `mcp__plugin_agent-mode_agent-mode__run_code`) is directly callable. A direct call to any other tool is rejected before policy with DSH's verbatim message: `only \`run_code\` is callable directly — call \`<name>\` from inside a \`run_code\` program instead`. Work happens inside Python programs that call the generated SDK (`await tools.name(args)`); only printed/returned values enter the conversation. |
 | **Minimal mode** | `/agent-mode:minimal` | The persona is exactly *"You are a helpful software engineer assistant."* (DSH `complete: true`). Only the persistent shell plus image reads remain; `Read`/`Write`/`Edit`/`Glob`/`Grep` etc. are denied. |
 | **Normal** | `/agent-mode:normal` | Restores ZCode's default behavior. |
 

@@ -4,7 +4,7 @@ Ports the **DeepSeek Harness (DSH)** agent presets to ZCode:
 
 | Mode | DSH preset | Effect |
 |---|---|---|
-| **PTC mode** | `preset-ptc` (`/agent-mode:ptc`) | Only `run_code` (exposed as `mcp__agent-mode__run_code`) is directly callable; every other tool call is rejected before policy with DSH's verbatim message. Work happens inside Python programs that call the generated SDK (`await tools.name(args)`); only printed/returned values enter the conversation. |
+| **PTC mode** | `preset-ptc` (`/agent-mode:ptc`) | Only `run_code` (exposed as `mcp__plugin_agent-mode_agent-mode__run_code`) is directly callable; every other tool call is rejected before policy with DSH's verbatim message. Work happens inside Python programs that call the generated SDK (`await tools.name(args)`); only printed/returned values enter the conversation. |
 | **Minimal mode** | `preset-minimal` (`/agent-mode:minimal`) | Persona is exactly *"You are a helpful software engineer assistant."*; only the persistent shell plus image reads remain — `Read`/`Write`/`Edit`/`Glob`/`Grep` etc. are denied. |
 | **Normal** | — (`/agent-mode:normal`) | Restores ZCode defaults. |
 
@@ -33,3 +33,4 @@ python -X utf8 -I tests\validate_plugin.py        # manifest/catalog/resources
 - DSH's released PTC runtime is Node/TypeScript; this host has no standalone Node, so the shipped runtime is the **Python flavor** (DSH also implements it, including the exact SDK text). Programs run in-process-spawned CPython instead of the POSIX-confined runtime; file-sandbox enforcement is reported as `partial`.
 - MCP cannot re-register or defer-context like the host: `read_image`'s deferred image delivery and provider-gated `web_search` are not mounted (mirroring DSH's own gating when no provider is configured).
 - Mode is a global switch (state file) rather than a per-session harness mode.
+- Loading this plugin's own mode briefings (`Skill` with an `agent-mode` skill) stays reachable inside any mode — the analog of DSH's harness-owned prompt sections; any other `Skill` call is treated like any other tool.
