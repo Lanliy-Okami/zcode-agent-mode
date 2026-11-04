@@ -50,12 +50,24 @@ SERVER_VERSION = "0.1.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 MAX_PARALLEL_SUB_CALLS = 10  # DSH tool-executor-ptc default maxParallelSubCalls
-MAX_WALL_MS = 600000  # DSH Python runtime maxWallMs default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+
+
+# DSH Python runtime budgets are CONFIG fields (maxWallMs etc.); expose them as
+# environment overrides. Defaults raised beyond DSH's 600000 ms so long builds
+# (large Rust CI probes etc.) fit within one run_code call.
+MAX_WALL_MS = _env_int("AGENT_MODE_MAX_WALL_MS", 3600000)
 MAX_VALUE_BYTES = 32768  # DSH Python runtime maxValueBytes default
 MAX_LOG_BYTES = 65536  # DSH Python runtime maxLogBytes default
 LOG_TRUNCATION_MARKER = "[dsh-ptc-runtime-python] log capture truncated at 65536 bytes"
 SHELL_DEFAULT_TIMEOUT_MS = 120000
-SHELL_MAX_TIMEOUT_MS = 600000
+SHELL_MAX_TIMEOUT_MS = _env_int("AGENT_MODE_SHELL_MAX_TIMEOUT_MS", 3600000)
 SHELL_MAX_OUTPUT_CHARS = 16000
 READ_LIMIT = 2000
 READ_MAX_LINE_LENGTH = 2000
@@ -200,7 +212,7 @@ def _tool_pwsh(args: dict) -> dict:
 # ---------------------------------------------------------------- jobs (DSH tool-jobs)
 
 JOB_WAIT_DEFAULT_MS = 30000
-JOB_WAIT_MAX_MS = 600000
+JOB_WAIT_MAX_MS = _env_int("AGENT_MODE_JOB_WAIT_MAX_MS", 3600000)
 
 
 class _Job:

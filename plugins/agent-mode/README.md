@@ -20,6 +20,17 @@ Ports the **DeepSeek Harness (DSH)** agent presets to ZCode:
 
 Mode lives in `%USERPROFILE%\.zcode\agent-mode.json` as `{"mode": "ptc" | "minimal" | "normal"}`; a workspace copy at `<workspace>\.zcode\agent-mode.json` is honored only if the user file is absent.
 
+## Budget configuration (environment variables)
+
+DSH's runtime budgets are configuration; the plugin exposes them as env vars (defaults raised beyond DSH's 600000 ms so long builds fit in one `run_code` call):
+
+| Variable | Default | Controls |
+|---|---|---|
+| `AGENT_MODE_MAX_WALL_MS` | 3600000 (1 h) | run_code program wall deadline |
+| `AGENT_MODE_SHELL_MAX_TIMEOUT_MS` | 3600000 | pwsh timeoutMs cap |
+| `AGENT_MODE_JOB_WAIT_MAX_MS` | 3600000 | job_output wait cap |
+| `AGENT_MODE_MCP_CALL_TIMEOUT_S` | 600 | proxied MCP tools/call timeout |
+
 ## Tests (development host)
 
 ```

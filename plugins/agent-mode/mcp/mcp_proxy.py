@@ -32,7 +32,18 @@ from typing import Any
 
 PROTOCOL_VERSION = "2024-11-05"
 DISCOVERY_TIMEOUT_S = 15
-CALL_TIMEOUT_S = 300
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+
+
+# DSH budgets are configuration; long proxied MCP calls (CI builds via remote
+# servers etc.) get a generous, env-overridable default.
+CALL_TIMEOUT_S = _env_int("AGENT_MODE_MCP_CALL_TIMEOUT_S", 600)
 CACHE_TTL_S = 600
 MAX_TOOLS_PER_SERVER = 100
 MAX_TOOLS_PER_SERVER_TOTAL = 300  # paginate up to this many tools per server
