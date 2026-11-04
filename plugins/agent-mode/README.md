@@ -30,7 +30,8 @@ python -X utf8 -I tests\validate_plugin.py        # manifest/catalog/resources
 
 ## Known divergences from DSH (by platform necessity)
 
-- DSH's released PTC runtime is Node/TypeScript; this host has no standalone Node, so the shipped runtime is the **Python flavor** (DSH also implements it, including the exact SDK text). Programs run in-process-spawned CPython instead of the POSIX-confined runtime; file-sandbox enforcement is reported as `partial`.
-- MCP cannot re-register or defer-context like the host: `read_image`'s deferred image delivery and provider-gated `web_search` are not mounted (mirroring DSH's own gating when no provider is configured).
-- Mode is a global switch (state file) rather than a per-session harness mode.
-- Loading this plugin's own mode briefings (`Skill` with an `agent-mode` skill) stays reachable inside any mode — the analog of DSH's harness-owned prompt sections; any other `Skill` call is treated like any other tool.
+- DSH's released PTC runtime is Node/TypeScript; this host ships the **Python flavor** (which DSH also implements, with the exact model-facing texts). Programs run in fresh CPython processes without the POSIX file-sandbox backend; file-sandbox enforcement is reported as `partial`.
+- Host-integration-only capabilities cannot be reproduced from a plugin: `read_image`'s deferred image delivery, provider-gated `web_search` (omitted — mirroring DSH's own admission when no provider is configured), `present` (deliverables UI), `goal`/`schedule` (Host session/scheduler services), and `subagent`/`subagent_fork` (Zcode's native Agent tool is denied under PTC like any other direct call).
+- `ask_user_question` blocks inside programs when the client supports MCP elicitation; otherwise it degrades to DSH's timed-mode pending shape (`{pending, callId, message}`) and the user's next message is the answer.
+- Mode state is per session (owner-stamped state file, session id provided by the session banner); sessions without an id fall back to the global file.
+- Loading this plugin's own mode briefings (`Skill` with an `agent-mode` skill) stays reachable inside any mode — the analog of DSH's harness-owned prompt sections; other skills load via the `skill` binding, as in DSH.

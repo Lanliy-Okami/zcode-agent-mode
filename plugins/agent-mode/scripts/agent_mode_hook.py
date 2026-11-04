@@ -22,6 +22,7 @@ import io
 import json
 import os
 import sys
+import time
 
 # DSH read_image accepted extensions (packages/fs/tool-fs/src/read-image.ts).
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
@@ -62,13 +63,17 @@ DIRECT_INTERACTION_TOOLS = {"AskUserQuestion"}
 
 
 PTC_CONTEXT = (
-    "[Agent Mode: PTC] `run_code` is the only tool you can call directly — a tool "
-    "call naming any other tool fails. The harness exposes it as "
+    "[Agent Mode: PTC] You are a coding agent powered by the current session's model. "
+    "`run_code` is the only tool you can call directly — a tool call naming any other "
+    "tool fails. The harness exposes it as "
     f"`{RUN_CODE_TOOL}`. Reach every tool the SDK declares in the agent-mode:ptc-mode "
     "skill from inside the program as `await tools.name(args)`; only printed values "
-    "and the returned value become program output. Exception: `AskUserQuestion` "
+    "and the returned value become program output. Exceptions: `AskUserQuestion` "
     "stays directly callable for user interaction."
 )
+
+# DSH time-context: a standing prompt section carrying the current date/time.
+TIME_CONTEXT = "Today's date is {date} (local time {time})."
 
 MAX_PROXIED_TOOLS_IN_CONTEXT = 40
 
@@ -125,29 +130,111 @@ MINIMAL_DENY = (
 )
 
 
-def _candidate_state_files() -> list[str]:
-    candidates: list[str] = []
+def _state_home() -> str:
     home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-    candidates.append(os.path.join(home, ".zcode", "agent-mode.json"))
-    candidates.append(os.path.join(os.getcwd(), ".zcode", "agent-mode.json"))
-    override = os.environ.get("AGENT_MODE_STATE_FILE")
-    if override:
-        candidates.insert(0, override)
-    return candidates
+    return os.path.join(home, ".zcode")
+
+
+def _session_id() -> str | None:
+    sid = os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("ZCODE_SESSION_ID")
+    return sid if sid else None
+
+
+def _session_state_path(sid: str) -> str:
+    return os.path.join(_state_home(), "agent-mode-sessions", f"{sid}.json")
+
+
+def _load_json(path: str) -> dict | None:
+    try:
+        with io.open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+ADOPTION_WINDOW_S = 120  # an unowned global write only counts as fresh this long
+
+
+def _sync_session_state(sid: str) -> str | None:
+    """Per-session mode state (DSH sessions carry their own mode).
+
+    The switch command writes the GLOBAL file with the session's `owner` id
+    (the session banner in the injected context provides it). Adoption rules:
+    - owner == this session → adopt when the global write is newer;
+    - unowned (hand edit / legacy) → adopt when newer, and only while fresh
+      when this session has no copy yet (a stale unowned file must not
+      activate a brand-new session);
+    - owner == another session → never leaks here.
+    """
+    path = _session_state_path(sid)
+    session = _load_json(path)
+    global_path = os.path.join(_state_home(), "agent-mode.json")
+    g = _load_json(global_path)
+    g_mode = g.get("mode") if g else None
+    g_mode = str(g_mode) if g_mode in ("ptc", "minimal", "normal") else None
+    owner = g.get("owner") if g else None
+    try:
+        g_mtime = os.path.getmtime(global_path)
+    except OSError:
+        g_mtime = None
+    try:
+        s_mtime = os.path.getmtime(path)
+    except OSError:
+        s_mtime = None
+
+    adopt = False
+    if g is not None:
+        if owner == sid:
+            adopt = s_mtime is None or (g_mtime is not None and g_mtime > s_mtime)
+        elif owner is None:
+            if s_mtime is None:
+                fresh = g_mtime is not None and (time.time() - g_mtime) < ADOPTION_WINDOW_S
+                adopt = fresh
+            else:
+                adopt = g_mtime is not None and g_mtime > s_mtime
+        # owner != sid: another session's switch — ignore.
+    if adopt:
+        resolved = g_mode if g_mode in ("ptc", "minimal") else None
+        _write_session_state(sid, resolved)
+        return resolved
+    if session is not None:
+        mode = session.get("mode")
+        return str(mode) if mode in ("ptc", "minimal") else None
+    return None
+
+
+def _write_session_state(sid: str, mode: str | None) -> None:
+    path = _session_state_path(sid)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump({"mode": mode, "owner": sid}, handle, ensure_ascii=False)
+    except OSError:
+        pass
 
 
 def read_mode() -> str | None:
-    """Resolve the active Agent Mode: 'ptc', 'minimal', or None."""
-    for path in _candidate_state_files():
-        try:
-            with io.open(path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (OSError, ValueError):
-            continue
-        mode = data.get("mode") if isinstance(data, dict) else None
-        if mode in ("ptc", "minimal"):
-            return str(mode)
+    """Resolve the active Agent Mode: 'ptc', 'minimal', or None.
+
+    With a session id available the resolution is per-session; otherwise it is
+    the global file (then workspace), preserving the pre-0.3.0 behavior.
+    """
+    override = os.environ.get("AGENT_MODE_STATE_FILE")
+    if override:
+        data = _load_json(override)
+        if data is not None:
+            mode = data.get("mode")
+            return str(mode) if mode in ("ptc", "minimal") else None
         return None
+    sid = _session_id()
+    if sid:
+        return _sync_session_state(sid)
+    for path in (os.path.join(_state_home(), "agent-mode.json"), os.path.join(os.getcwd(), ".zcode", "agent-mode.json")):
+        data = _load_json(path)
+        if data is not None:
+            mode = data.get("mode")
+            return str(mode) if mode in ("ptc", "minimal") else None
     return None
 
 
@@ -224,12 +311,33 @@ def handle_pre_tool_use() -> None:
     return
 
 
+def _session_banner() -> str:
+    sid = _session_id()
+    if not sid:
+        return ""
+    return (
+        f"[Agent Mode session] id: {sid} — when switching modes, put this id in the "
+        '`"owner"` field of %USERPROFILE%\\.zcode\\agent-mode.json so the switch stays '
+        "scoped to this session."
+    )
+
+
 def handle_user_prompt_submit() -> None:
     mode = read_mode()
     if mode == "ptc":
-        context = PTC_CONTEXT + _proxy_bindings_context()
+        import datetime
+
+        now = datetime.datetime.now()
+        time_context = TIME_CONTEXT.format(date=now.strftime("%Y-%m-%d"), time=now.strftime("%H:%M"))
+        banner = _session_banner()
+        context = time_context + "\n\n" + PTC_CONTEXT + _proxy_bindings_context()
+        if banner:
+            context = banner + "\n\n" + context
     elif mode == "minimal":
+        banner = _session_banner()
         context = MINIMAL_CONTEXT
+        if banner:
+            context = banner + "\n\n" + context
     else:
         return
     json.dump(

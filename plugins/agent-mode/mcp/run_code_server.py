@@ -37,6 +37,7 @@ import threading
 import urllib.error
 import urllib.request
 import fnmatch
+import time
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -67,7 +68,7 @@ FETCH_TIMEOUT_S = 60
 
 RUN_CODE_TOOL = "run_code"
 
-EXCLUSIVE_TOOLS = {"pwsh", "write", "edit"}  # mutating calls run alone, in submission order
+EXCLUSIVE_TOOLS = {"pwsh", "write", "edit", "ask_user_question", "todo_write", "job_kill"}  # mutating/user-blocking calls run alone, in submission order
 
 RUN_CODE_DESCRIPTION = tool_schemas.build_run_code_description()
 RUN_CODE_INPUT_SCHEMA = tool_schemas.build_run_code_input_schema()
@@ -100,12 +101,20 @@ class CodeRunFailed(Exception):
 # ---------------------------------------------------------------- state file
 
 def read_mode() -> str | None:
-    """Resolve the active Agent Mode; mirrors scripts/agent_mode_hook.py."""
+    """Resolve the active Agent Mode; mirrors scripts/agent_mode_hook.py.
+
+    Session-aware when the harness passes CLAUDE_SESSION_ID: the session copy
+    written by the enforcement hook wins; otherwise the global/workspace files.
+    """
     home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-    candidates = [os.path.join(home, ".zcode", "agent-mode.json")]
     override = os.environ.get("AGENT_MODE_STATE_FILE")
+    candidates: list[str] = []
     if override:
-        candidates.insert(0, override)
+        candidates.append(override)
+    sid = os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("ZCODE_SESSION_ID")
+    if sid:
+        candidates.append(os.path.join(home, ".zcode", "agent-mode-sessions", f"{sid}.json"))
+    candidates.append(os.path.join(home, ".zcode", "agent-mode.json"))
     candidates.append(os.path.join(os.getcwd(), ".zcode", "agent-mode.json"))
     for path in candidates:
         try:
@@ -132,52 +141,271 @@ def _clip(text: str, max_chars: int) -> tuple[str, bool]:
     return text[-max_chars:], True  # DSH keeps the tail of long output
 
 
-async def _tool_pwsh(args: dict) -> dict:
+def _tool_pwsh(args: dict) -> dict:
     command = args.get("command")
     description = args.get("description")
     if not isinstance(command, str) or not command:
         raise ToolFailure("pwsh failed: invalid command: expected a non-empty string")
     if not isinstance(description, str) or description.strip() == "":
         raise ToolFailure("pwsh failed: invalid description: expected a non-empty string")
-    timeout_ms = args.get("timeoutMs", SHELL_DEFAULT_TIMEOUT_MS)
-    if not isinstance(timeout_ms, (int, float)) or timeout_ms <= 0:
-        timeout_ms = SHELL_DEFAULT_TIMEOUT_MS
-    timeout_ms = min(timeout_ms, SHELL_MAX_TIMEOUT_MS)
     workdir = args.get("workdir")
     cwd = _resolve(workdir) if isinstance(workdir, str) and workdir else os.getcwd()
     if not os.path.isdir(cwd):
         raise ToolFailure(f"pwsh failed: workdir does not exist: {cwd}")
     shell = shutil.which("pwsh") or "powershell.exe"
-    timed_out = False
-    try:
-        completed = await asyncio.to_thread(
-            subprocess.run,
-            [shell, "-NoProfile", "-NonInteractive", "-Command", command],
-            capture_output=True,
-            cwd=cwd,
-            timeout=timeout_ms / 1000.0,
-        )
-        exit_code = completed.returncode
-        stdout_bytes, stderr_bytes = completed.stdout, completed.stderr
-    except subprocess.TimeoutExpired as expired:
-        timed_out = True
-        exit_code = 1  # DSH: a force-killed Windows command settles as [exit code: 1]
-        stdout_bytes = expired.stdout or b""
-        stderr_bytes = expired.stderr or b""
-    except OSError as error:
-        raise ToolFailure(f"pwsh failed: {error}") from None
-    stdout_text, stdout_truncated = _clip(stdout_bytes.decode("utf-8", errors="replace"), SHELL_MAX_OUTPUT_CHARS)
-    stderr_text, stderr_truncated = _clip(stderr_bytes.decode("utf-8", errors="replace"), SHELL_MAX_OUTPUT_CHARS)
+    run_in_background = bool(args.get("run_in_background", False))
+    if run_in_background:
+        job = _start_shell_job(command, description, cwd, shell)
+        return {"kind": "background", "cwd": cwd, "jobId": job.id}
+    timeout_ms = args.get("timeoutMs", SHELL_DEFAULT_TIMEOUT_MS)
+    if not isinstance(timeout_ms, (int, float)) or timeout_ms <= 0:
+        timeout_ms = SHELL_DEFAULT_TIMEOUT_MS
+    timeout_ms = min(timeout_ms, SHELL_MAX_TIMEOUT_MS)
+    # Popen + bounded wait so a timeout can PROMOTE to a background job
+    # (DSH tool-bash promoteOnTimeout: default true) instead of being killed.
+    process = subprocess.Popen(
+        [shell, "-NoProfile", "-NonInteractive", "-Command", command],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+    )
+    job = _Job(kind="pwsh", label=description, process=process)
+    _start_job_pumps(job)
+    timed_out = not job.done_event.wait(timeout_ms / 1000.0)
+    if timed_out:
+        _register_job(job)
+        partial = job.snapshot_output()[0]
+        return {
+            "kind": "promoted",
+            "cwd": cwd,
+            "jobId": job.id,
+            "timeoutMs": int(timeout_ms),
+            "output": partial,
+        }
+    exit_code = process.poll()
+    stdout_text, stdout_truncated = _clip(job.stdout_text(), SHELL_MAX_OUTPUT_CHARS)
+    stderr_text, stderr_truncated = _clip(job.stderr_text(), SHELL_MAX_OUTPUT_CHARS)
     return {
         "kind": "foreground",
         "cwd": cwd,
-        "exitCode": exit_code,
+        "exitCode": exit_code if exit_code is not None else 1,
         "signal": None,
-        "timedOut": timed_out,
+        "timedOut": False,
         "aborted": False,
         "stdout": {"text": stdout_text, "truncated": stdout_truncated},
         "stderr": {"text": stderr_text, "truncated": stderr_truncated},
     }
+
+
+# ---------------------------------------------------------------- jobs (DSH tool-jobs)
+
+JOB_WAIT_DEFAULT_MS = 30000
+JOB_WAIT_MAX_MS = 600000
+
+
+class _Job:
+    def __init__(self, kind: str, label: str, process: subprocess.Popen) -> None:
+        self.id = f"job-{next(_job_counter)}"
+        self.kind = kind
+        self.label = label
+        self.process = process
+        self.status = "running"
+        self.detail: str | None = None
+        self.started_at = int(time.time() * 1000)
+        self.finished_at: int | None = None
+        self.stdout_parts: list[str] = []
+        self.stderr_parts: list[str] = []
+        self.read_cursor = 0  # job_output reads output SINCE the previous read
+        self.done_event = threading.Event()
+        self._parts_lock = threading.Lock()
+        self.active_pumps = 2  # stdout + stderr; settle only when BOTH drain
+
+    def _append(self, sink: list[str], chunk: str) -> None:
+        with self._parts_lock:
+            sink.append(chunk)
+
+    def pump(self, pipe, sink: list[str]) -> None:
+        try:
+            for raw in iter(pipe.readline, b""):
+                self._append(sink, raw.decode("utf-8", errors="replace"))
+        except Exception:
+            pass
+        finally:
+            with self._parts_lock:
+                self.active_pumps -= 1
+                drained = self.active_pumps == 0
+            if drained:
+                self._settle()
+
+    def _settle(self) -> None:
+        if self.status == "running":
+            try:
+                code = self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                code = None
+            self.finished_at = int(time.time() * 1000)
+            if code == 0:
+                self.status = "completed"
+            else:
+                self.status = "failed"
+                self.detail = f"exit code {code}"
+        self.done_event.set()
+
+    def snapshot_output(self) -> tuple[str, str]:
+        with self._parts_lock:
+            return "".join(self.stdout_parts), "".join(self.stderr_parts)
+
+    def stdout_text(self) -> str:
+        return self.snapshot_output()[0]
+
+    def stderr_text(self) -> str:
+        return self.snapshot_output()[1]
+
+    def since_cursor(self) -> str:
+        with self._parts_lock:
+            joined = "".join(self.stdout_parts)
+            tail = joined[self.read_cursor:]
+            self.read_cursor = len(joined)
+        return tail
+
+    def public(self) -> dict:
+        shape = {
+            "id": self.id,
+            "kind": self.kind,
+            "label": self.label,
+            "status": self.status,
+            "startedAt": self.started_at,
+        }
+        if self.detail is not None:
+            shape["detail"] = self.detail
+        if self.finished_at is not None:
+            shape["finishedAt"] = self.finished_at
+        return shape
+
+
+_job_counter = iter(range(1, 10**9))
+_JOBS: dict[str, _Job] = {}
+_JOBS_LOCK = threading.Lock()
+
+
+def _start_job_pumps(job: _Job) -> None:
+    assert job.process.stdout is not None and job.process.stderr is not None
+    threading.Thread(target=job.pump, args=(job.process.stdout, job.stdout_parts), daemon=True).start()
+    threading.Thread(target=job.pump, args=(job.process.stderr, job.stderr_parts), daemon=True).start()
+
+
+def _start_shell_job(command: str, label: str, cwd: str, shell: str) -> _Job:
+    process = subprocess.Popen(
+        [shell, "-NoProfile", "-NonInteractive", "-Command", command],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+    )
+    job = _Job(kind="pwsh", label=label, process=process)
+    _start_job_pumps(job)
+    _register_job(job)
+    return job
+
+
+def _register_job(job: _Job) -> None:
+    with _JOBS_LOCK:
+        _JOBS[job.id] = job
+
+
+def _get_job(job_id: str) -> _Job:
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+    if job is None:
+        raise ToolFailure(f"job_output failed: unknown job id: {job_id}")
+    return job
+
+
+def _tool_job_output(args: dict) -> dict:
+    job_id = args.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        raise ToolFailure("job_output failed: invalid job_id: expected a non-empty string")
+    job = _get_job(job_id)
+    if args.get("wait"):
+        timeout_ms = args.get("timeout_ms", JOB_WAIT_DEFAULT_MS)
+        if not isinstance(timeout_ms, (int, float)) or timeout_ms <= 0:
+            timeout_ms = JOB_WAIT_DEFAULT_MS
+        timeout_ms = min(timeout_ms, JOB_WAIT_MAX_MS)
+        job.done_event.wait(timeout_ms / 1000.0)
+        # DSH: a timed-out wait returns job state, not a timeout error.
+    text = job.since_cursor()
+    return {"text": text if text else "(no new output)", "job": job.public()}
+
+
+def _tool_job_list(args: dict) -> list:
+    with _JOBS_LOCK:
+        jobs = list(_JOBS.values())
+    return [job.public() for job in jobs]
+
+
+def _tool_job_kill(args: dict) -> dict:
+    job_id = args.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        raise ToolFailure("job_kill failed: invalid job_id: expected a non-empty string")
+    job = _get_job(job_id)
+    if job.status == "running":
+        try:
+            _kill_process_tree(job.process)
+        except OSError:
+            pass
+        job.status = "killed"
+        job.finished_at = int(time.time() * 1000)
+        job.done_event.set()
+        return {"outcome": "cancellation-requested", "job": job.public()}
+    return {"outcome": "already-finished", "job": job.public()}
+
+
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True)
+    else:
+        process.kill()
+
+
+# ---------------------------------------------------------------- skill (DSH tool-skill)
+
+SKILL_SEARCH_DIRS = (
+    ("user", (".zcode", "skills"), 400),
+    ("user-agents", (".agents", "skills"), 500),
+)
+
+
+def _tool_skill(args: dict) -> dict:
+    name = args.get("name")
+    if not isinstance(name, str) or not name:
+        raise ToolFailure('skill failed: expected the exact skill name from the available skills list')
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    roots = [
+        os.path.join(home, ".zcode", "skills"),
+        os.path.join(home, ".agents", "skills"),
+        os.path.join(os.getcwd(), ".zcode", "skills"),
+        os.path.join(os.getcwd(), ".agents", "skills"),
+    ]
+    candidates = [os.path.join(root, name, "SKILL.md") for root in roots]
+    candidates += [os.path.join(root, f"{name}.md") for root in roots]
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            with io.open(candidate, "r", encoding="utf-8", errors="replace") as handle:
+                body = handle.read()
+        except OSError as error:
+            raise ToolFailure(f"skill failed: {error}") from None
+        content = _strip_frontmatter(body)
+        return {"name": name, "provider": "filesystem", "content": content}
+    raise ToolFailure(f'skill "{name}" is unknown or no longer available')
+
+
+def _strip_frontmatter(body: str) -> str:
+    if body.startswith("---"):
+        end = body.find("\n---", 3)
+        if end != -1:
+            return body[end + 4:].lstrip("\n").strip()
+    return body.strip()
 
 
 def _tool_read(args: dict) -> dict:
@@ -424,6 +652,202 @@ def _tool_web_fetch(args: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------- client requests (elicitation)
+
+_pending_client_responses: dict[int, dict] = {}
+_pending_events: dict[int, threading.Event] = {}
+_client_request_id_lock = threading.Lock()
+_client_request_next_id = 0
+STDOUT_LOCK = threading.Lock()
+CLIENT_SUPPORTS_ELICITATION = False
+CLIENT_SUPPORTS_SAMPLING = False
+
+ELICITATION_CALL_TIMEOUT_S = 600
+
+# DSH timed-mode pending message (packages/interaction/tool-ask-user/src/timed.ts),
+# used verbatim when the client cannot elicit and the binding degrades to pending.
+DSH_PENDING_MESSAGE = (
+    "No answer batch arrived before the timeout. This is pending, not a skipped answer. "
+    "Continue useful independent work. The user can still answer; their reply will be a "
+    "user message identified as answer_to_pending_question with this callId and the "
+    "original questions. Do not treat this as permission."
+)
+
+
+def send_client_request(method: str, params: dict, timeout_s: float) -> dict:
+    """Send a server→client JSON-RPC request and wait for its response.
+
+    The reader loop resolves the future via _on_client_response.
+    """
+    global _client_request_next_id
+    with _client_request_id_lock:
+        _client_request_next_id += 1
+        request_id = _client_request_next_id
+    event = threading.Event()
+    with STDOUT_LOCK:
+        _pending_events[request_id] = event
+    payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
+    with STDOUT_LOCK:
+        try:
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+        except OSError as error:
+            _pending_events.pop(request_id, None)
+            raise RuntimeError(f"transport write failed: {error}") from None
+    if not event.wait(timeout_s):
+        _pending_events.pop(request_id, None)
+        raise RuntimeError(f"no response to {method} within {timeout_s:g}s")
+    with STDOUT_LOCK:
+        _pending_events.pop(request_id, None)
+        response = _pending_client_responses.pop(request_id, None)
+    if response is None:
+        raise RuntimeError(f"no response to {method}")
+    if "error" in response:
+        error = response["error"]
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        raise RuntimeError(f"{method} rejected: {message}")
+    return response.get("result") or {}
+
+
+def _on_client_response(request_id: int, message: dict) -> None:
+    with STDOUT_LOCK:
+        event = _pending_events.get(request_id)
+        if event is not None:
+            _pending_client_responses[request_id] = message
+            event.set()
+
+
+def _format_questions_for_elicitation(questions: list[dict]) -> tuple[str, dict]:
+    """Render DSH's legacy question batch as one elicitation message + schema."""
+    lines: list[str] = []
+    schema_properties: dict = {}
+    required: list[str] = []
+    for question in questions:
+        qid = str(question.get("id"))
+        text = str(question.get("question"))
+        header = question.get("header")
+        options = question.get("options") or []
+        multi = bool(question.get("multi_select", False))
+        title = f"{header}: {text}" if isinstance(header, str) and header else text
+        block = title
+        if options:
+            labels = [str(o.get("label")) for o in options if isinstance(o, dict) and o.get("label")]
+            descriptions = {
+                str(o.get("label")): str(o.get("description"))
+                for o in options
+                if isinstance(o, dict) and o.get("label") and o.get("description")
+            }
+            if labels:
+                block += " Options:"
+                for label in labels:
+                    description = descriptions.get(label)
+                    block += f"\n  - {label}" + (f" — {description}" if description else "")
+                block += "\nAnswer with the option label" + ("s, comma-separated" if multi else "") + "; or type your own."
+        schema_properties[qid] = {
+            "type": "string",
+            "description": "Your answer" + (" (option labels, comma-separated, or free text)" if options else ""),
+        }
+        required.append(qid)
+        lines.append(block)
+    message = "\n\n".join(lines)
+    schema = {"type": "object", "properties": schema_properties, "required": required}
+    return message, schema
+
+
+def _parse_answer_text(text: str, question: dict) -> dict:
+    """Map the elicited free text onto DSH's answer shape {id, selected, custom?}."""
+    options = question.get("options") or []
+    labels = [str(o.get("label")) for o in options if isinstance(o, dict) and o.get("label")]
+    by_lower = {label.lower(): label for label in labels}
+    selected: list[str] = []
+    custom_parts: list[str] = []
+    for token in text.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        matched = by_lower.get(token.lower())
+        if matched is not None:
+            selected.append(matched)
+        else:
+            custom_parts.append(token)
+    answer: dict = {"id": str(question.get("id")), "selected": selected}
+    if custom_parts:
+        answer["custom"] = "; ".join(custom_parts)
+    return answer
+
+
+def _tool_ask_user_question(args: dict) -> dict:
+    questions = args.get("questions")
+    if not isinstance(questions, list) or not questions:
+        raise ToolFailure("ask_user_question failed: questions must be a non-empty array")
+    for question in questions:
+        if not isinstance(question, dict) or not isinstance(question.get("id"), str) or not isinstance(question.get("question"), str):
+            raise ToolFailure("ask_user_question failed: each question needs string id and question")
+    call_id = f"ask-{os.getpid()}-{int(time.time() * 1000)}"
+    if CLIENT_SUPPORTS_ELICITATION:
+        try:
+            message, schema = _format_questions_for_elicitation(questions)
+            result = send_client_request(
+                "elicitation/create",
+                {"message": message, "requestedSchema": schema},
+                timeout_s=ELICITATION_CALL_TIMEOUT_S,
+            )
+            action = result.get("action")
+            content = result.get("content") or {}
+            if action == "accept":
+                answers = []
+                for question in questions:
+                    qid = str(question.get("id"))
+                    text = content.get(qid) if isinstance(content, dict) else None
+                    if isinstance(text, str) and text.strip():
+                        answers.append(_parse_answer_text(text, question))
+                    else:
+                        answers.append({"id": qid, "selected": []})  # DSH skip semantics
+                return {"answers": answers}
+            # decline/cancel: DSH skip semantics — empty selected, no custom.
+            return {"answers": [{"id": str(q.get("id")), "selected": []} for q in questions]}
+        except RuntimeError:
+            pass  # fall through to the DSH timed-mode pending shape
+    # Client cannot elicit: degrade to DSH's timed-mode pending result. The
+    # answer will arrive as a later user message in the conversation.
+    return {
+        "pending": True,
+        "callId": call_id,
+        "message": DSH_PENDING_MESSAGE,
+    }
+
+
+def _todos_state_path() -> str:
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    return os.path.join(home, ".zcode", "agent-mode-todos.json")
+
+
+def _tool_todo_write(args: dict) -> dict:
+    todos = args.get("todos")
+    if not isinstance(todos, list):
+        raise ToolFailure("todo_write failed: todos must be an array")
+    valid_statuses = {"pending", "in_progress", "completed"}
+    clean: list[dict] = []
+    for todo in todos:
+        if not isinstance(todo, dict) or not isinstance(todo.get("content"), str) or todo.get("status") not in valid_statuses:
+            raise ToolFailure(
+                "invalid todos: each todo needs a string content and a status in pending|in_progress|completed"
+            )
+        clean.append({"content": todo["content"], "status": todo["status"]})
+    counts = {
+        "pending": sum(1 for t in clean if t["status"] == "pending"),
+        "inProgress": sum(1 for t in clean if t["status"] == "in_progress"),
+        "completed": sum(1 for t in clean if t["status"] == "completed"),
+    }
+    try:
+        with io.open(_todos_state_path(), "w", encoding="utf-8", newline="\n") as handle:
+            json.dump({"todos": clean}, handle, ensure_ascii=False, indent=2)
+    except OSError:
+        pass  # the durable copy is best-effort; the canonical value still returns
+    return {"todos": clean, "counts": counts}
+
+
 REGISTRY = {
     "pwsh": _tool_pwsh,
     "read": _tool_read,
@@ -432,6 +856,12 @@ REGISTRY = {
     "glob": _tool_glob,
     "grep": _tool_grep,
     "web_fetch": _tool_web_fetch,
+    "ask_user_question": _tool_ask_user_question,
+    "todo_write": _tool_todo_write,
+    "job_output": _tool_job_output,
+    "job_list": _tool_job_list,
+    "job_kill": _tool_job_kill,
+    "skill": _tool_skill,
 }
 
 
@@ -487,20 +917,15 @@ class ProgramRun:
                 call_args = args if isinstance(args, dict) else {}
                 tool = REGISTRY.get(name)
                 if tool is not None:
-                    def invoke():
-                        if isinstance(tool, _AsyncTool):
-                            return tool.call(call_args)
-                        return tool(call_args)
-
                     # DSH native concurrency contract: mutating calls run alone, in
                     # submission order; safe calls may overlap, capped at maxParallel.
                     if name in EXCLUSIVE_TOOLS:
                         with self.exclusive_lock:
                             with self.parallel_semaphore:
-                                value = invoke()
+                                value = tool(call_args)
                     else:
                         with self.parallel_semaphore:
-                            value = invoke()
+                            value = tool(call_args)
                 elif name in mcp_proxy.PROXY.tools:
                     # Fail-closed exclusive (DSH's classification for undeclared
                     # execution modes): proxied MCP calls run alone, in order.
@@ -519,33 +944,6 @@ class ProgramRun:
                 self.send_reply(call_id, False, error=f"{type(error).__name__}: {error}")
 
         threading.Thread(target=run, daemon=True).start()
-
-
-class _AsyncTool:
-    """Bridge for tools implemented as async callables (pwsh)."""
-
-    def __init__(self, coroutine_fn) -> None:
-        self._coroutine_fn = coroutine_fn
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
-        self._thread.start()
-
-    def call(self, args: dict) -> Any:
-        future = asyncio.run_coroutine_threadsafe(self._coroutine_fn(args), self._loop)
-        return future.result()
-
-
-_PWSH = _AsyncTool(_tool_pwsh)
-
-REGISTRY: dict[str, Any] = {
-    "pwsh": _PWSH,
-    "read": _tool_read,
-    "write": _tool_write,
-    "edit": _tool_edit,
-    "glob": _tool_glob,
-    "grep": _tool_grep,
-    "web_fetch": _tool_web_fetch,
-}
 
 
 def _pump_channel(run: ProgramRun, channel_reader: io.BufferedReader) -> None:
@@ -801,7 +1199,11 @@ def handle_tools_call(params: dict) -> dict:
 
 
 def handle_request(method: str, params: dict) -> dict | None:
+    global CLIENT_SUPPORTS_ELICITATION, CLIENT_SUPPORTS_SAMPLING
     if method == "initialize":
+        capabilities = params.get("capabilities") or {}
+        CLIENT_SUPPORTS_ELICITATION = isinstance(capabilities, dict) and "elicitation" in capabilities
+        CLIENT_SUPPORTS_SAMPLING = isinstance(capabilities, dict) and "sampling" in capabilities
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
@@ -827,45 +1229,74 @@ def handle_request(method: str, params: dict) -> dict | None:
 JSONRPC_PARSE_ERROR = -32700
 JSONRPC_METHOD_NOT_FOUND = -32601
 
+_ROOT_RUN_LOCK = threading.Lock()  # DSH: root run_code calls are exclusive, serial
 
-def main() -> int:
-    stdin = sys.stdin.buffer
-    stdout = sys.stdout.buffer
-    for line in stdin:
+
+def _handle_client_request(method: str, params: dict, request_id: Any) -> None:
+    """Serve one client→server request (tools/call, ping) on its own thread."""
+    try:
+        if method == "tools/call" and params.get("name") == RUN_CODE_TOOL:
+            with _ROOT_RUN_LOCK:  # DSH: root run_code calls are exclusive and execute serially
+                result = handle_request(str(method), params)
+        else:
+            result = handle_request(str(method), params)
+    except Exception as error:  # a bug must not kill the transport
+        _write_message({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": f"{type(error).__name__}: {error}"}})
+        return
+    if result is None:
+        _write_message({"jsonrpc": "2.0", "id": request_id, "error": {"code": JSONRPC_METHOD_NOT_FOUND, "message": f"method not found: {method}"}})
+    else:
+        _write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+def _write_message(payload: dict) -> None:
+    with STDOUT_LOCK:
+        try:
+            sys.stdout.buffer.write(json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n")
+            sys.stdout.buffer.flush()
+        except OSError:
+            pass
+
+
+def _read_loop() -> None:
+    for line in sys.stdin.buffer:
         line = line.strip()
         if not line:
             continue
         try:
             message = json.loads(line.decode("utf-8"))
         except Exception:
-            _write_response(stdout, {"jsonrpc": "2.0", "id": None, "error": {"code": JSONRPC_PARSE_ERROR, "message": "parse error"}})
             continue
         if not isinstance(message, dict):
             continue
         method = message.get("method")
         request_id = message.get("id")
         if method is None:
+            # A response to one of OUR requests (e.g. elicitation/create).
+            if request_id is not None:
+                try:
+                    _on_client_response(int(request_id), message)
+                except (TypeError, ValueError):
+                    pass
             continue
-        if request_id is None:
-            continue  # notification (e.g. notifications/initialized): no response
         params = message.get("params") or {}
         if not isinstance(params, dict):
             params = {}
-        try:
-            result = handle_request(str(method), params)
-        except Exception as error:  # a bug must not kill the transport
-            _write_response(
-                stdout,
-                {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": f"{type(error).__name__}: {error}"}},
-            )
-            continue
-        if result is None:
-            _write_response(
-                stdout,
-                {"jsonrpc": "2.0", "id": request_id, "error": {"code": JSONRPC_METHOD_NOT_FOUND, "message": f"method not found: {method}"}},
-            )
-            continue
-        _write_response(stdout, {"jsonrpc": "2.0", "id": request_id, "result": result})
+        if request_id is None:
+            continue  # notification (e.g. notifications/initialized)
+        threading.Thread(
+            target=_handle_client_request, args=(str(method), params, request_id), daemon=True
+        ).start()
+
+
+def main() -> int:
+    reader = threading.Thread(target=_read_loop, daemon=True)
+    reader.start()
+    try:
+        while reader.is_alive():
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
     return 0
 
 

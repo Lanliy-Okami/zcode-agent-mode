@@ -54,27 +54,89 @@ GREP_DESCRIPTION = (
 
 WEB_FETCH_DESCRIPTION = "Fetch the content of a specific HTTP(S) URL and return it decoded to text."
 
-SHELL_OUTPUT_SCHEMA = {
+ASK_USER_QUESTION_DESCRIPTION = (
+    "Ask the user a concise question when you need confirmation, a choice, or missing information "
+    "before proceeding. An answer item with empty selected and no custom means the user skipped that "
+    "question: continue without it, do not ask it again, and do not treat the skip as permission."
+)
+
+TODO_WRITE_DESCRIPTION = (
+    "Record and update a task list to plan multi-step work and show progress; skip it for trivial "
+    "single-step tasks. Add one todo per concrete step before you start. While work remains, keep the "
+    "todos being worked on `in_progress`, several only when work runs in parallel. Mark each todo "
+    "`completed` as soon as it is done."
+)
+
+JOB_OUTPUT_DESCRIPTION = (
+    "Read a background job: output since the previous read for stream jobs, or the result of a finished final-output job."
+)
+JOB_LIST_DESCRIPTION = "List your background jobs (running and finished) with their ids, kinds, and statuses."
+JOB_KILL_DESCRIPTION = "Request cancellation of a running background job."
+SKILL_DESCRIPTION = (
+    "Load the full instructions for a skill. Call it before acting on a task that names or clearly "
+    "matches a skill in the session skill catalog."
+)
+JOB_ID_PARAM_DESCRIPTION = "Job id returned by the tool that started the background work."
+
+PUBLIC_JOB_SCHEMA = {
     "type": "object",
     "properties": {
-        "kind": {"type": "string", "const": "foreground"},
-        "cwd": {"type": "string"},
-        "exitCode": {"oneOf": [{"type": "integer"}, {"type": "null"}]},
-        "signal": {"oneOf": [{"type": "string"}, {"type": "null"}]},
-        "timedOut": {"type": "boolean"},
-        "aborted": {"type": "boolean"},
-        "stdout": {
-            "type": "object",
-            "properties": {"text": {"type": "string"}, "truncated": {"type": "boolean"}},
-            "required": ["text", "truncated"],
-        },
-        "stderr": {
-            "type": "object",
-            "properties": {"text": {"type": "string"}, "truncated": {"type": "boolean"}},
-            "required": ["text", "truncated"],
-        },
+        "id": {"type": "string"},
+        "kind": {"type": "string"},
+        "label": {"type": "string"},
+        "status": {"type": "string", "enum": ["running", "stopping", "completed", "killed", "failed"]},
+        "detail": {"type": "string"},
+        "startedAt": {"type": "integer"},
+        "finishedAt": {"type": "integer"},
     },
-    "required": ["kind", "cwd", "exitCode", "signal", "timedOut", "aborted", "stdout", "stderr"],
+    "required": ["id", "kind", "label", "status", "startedAt"],
+}
+
+SHELL_OUTPUT_SCHEMA = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "const": "foreground"},
+                "cwd": {"type": "string"},
+                "exitCode": {"oneOf": [{"type": "integer"}, {"type": "null"}]},
+                "signal": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+                "timedOut": {"type": "boolean"},
+                "aborted": {"type": "boolean"},
+                "stdout": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}, "truncated": {"type": "boolean"}},
+                    "required": ["text", "truncated"],
+                },
+                "stderr": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}, "truncated": {"type": "boolean"}},
+                    "required": ["text", "truncated"],
+                },
+            },
+            "required": ["kind", "cwd", "exitCode", "signal", "timedOut", "aborted", "stdout", "stderr"],
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "const": "promoted"},
+                "cwd": {"type": "string"},
+                "jobId": {"type": "string"},
+                "timeoutMs": {"type": "integer"},
+                "output": {"type": "string"},
+            },
+            "required": ["kind", "cwd", "jobId", "timeoutMs", "output"],
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "const": "background"},
+                "cwd": {"type": "string"},
+                "jobId": {"type": "string"},
+            },
+            "required": ["kind", "cwd", "jobId"],
+        },
+    ]
 }
 
 TOOLS = [
@@ -93,6 +155,10 @@ TOOLS = [
                 "workdir": {
                     "type": "string",
                     "description": "Working directory for this command. Defaults to the session workspace; a relative path is resolved against it.",
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Run in the background and return a job id immediately (collect with job_output, stop with job_kill). No timeout applies.",
                 },
             },
             "required": ["command", "description"],
@@ -274,6 +340,182 @@ TOOLS = [
                 "truncated": {"type": "boolean"},
             },
             "required": ["url", "statusCode", "body", "truncated"],
+        },
+    },
+    {
+        "name": "ask_user_question",
+        "description": ASK_USER_QUESTION_DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "description": "Questions to ask the user before continuing.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "Stable id for this question; echoed in the answer."},
+                            "question": {"type": "string", "description": "The specific question to ask the user."},
+                            "header": {"type": "string", "description": "Optional short heading for the question, such as \"Confirm\" or \"Choose Mode\"."},
+                            "options": {
+                                "type": "array",
+                                "description": "Optional choices to show the user. If you recommend one, put it first and append \"(Recommended)\" to that label.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {"type": "string", "description": "Short user-facing option label."},
+                                        "description": {"type": "string", "description": "One sentence explaining the tradeoff or impact."},
+                                    },
+                                    "required": ["label"],
+                                },
+                            },
+                            "multi_select": {"type": "boolean", "description": "Whether the user may select more than one option. Defaults to false."},
+                        },
+                        "required": ["id", "question"],
+                    },
+                },
+            },
+            "required": ["questions"],
+        },
+        "output": {
+            "type": "object",
+            "properties": {
+                "answers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "selected": {"type": "array", "items": {"type": "string"}},
+                            "custom": {"type": "string"},
+                        },
+                        "required": ["id", "selected"],
+                    },
+                },
+            },
+            "required": ["answers"],
+        },
+    },
+    {
+        "name": "todo_write",
+        "description": TODO_WRITE_DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "description": "The COMPLETE task list, replacing any previous list.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "description": "What the task is — a short imperative line."},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "description": "pending (not started) | in_progress (now) | completed (done).",
+                            },
+                        },
+                        "required": ["content", "status"],
+                    },
+                },
+            },
+            "required": ["todos"],
+        },
+        "output": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                        },
+                        "required": ["content", "status"],
+                    },
+                },
+                "counts": {
+                    "type": "object",
+                    "properties": {
+                        "pending": {"type": "integer"},
+                        "inProgress": {"type": "integer"},
+                        "completed": {"type": "integer"},
+                    },
+                    "required": ["pending", "inProgress", "completed"],
+                },
+            },
+            "required": ["todos", "counts"],
+        },
+    },
+    {
+        "name": "job_output",
+        "description": JOB_OUTPUT_DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": JOB_ID_PARAM_DESCRIPTION},
+                "wait": {
+                    "type": "boolean",
+                    "description": "Block until the job finishes or the timeout expires; a timed-out wait leaves the job running. Defaults to false.",
+                },
+                "timeout_ms": {
+                    "type": "number",
+                    "description": "Max wait in milliseconds with wait: true. Defaults to and is capped by configuration.",
+                },
+            },
+            "required": ["job_id"],
+        },
+        "output": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}, "job": PUBLIC_JOB_SCHEMA},
+            "required": ["text", "job"],
+        },
+    },
+    {
+        "name": "job_list",
+        "description": JOB_LIST_DESCRIPTION,
+        "parameters": {"type": "object", "properties": {}},
+        "output": {"type": "array", "items": PUBLIC_JOB_SCHEMA},
+    },
+    {
+        "name": "job_kill",
+        "description": JOB_KILL_DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": JOB_ID_PARAM_DESCRIPTION},
+                "reason": {"type": "string", "description": "Optional short reason, recorded in the log and forwarded to the job."},
+            },
+            "required": ["job_id"],
+        },
+        "output": {
+            "type": "object",
+            "properties": {
+                "outcome": {"type": "string", "enum": ["cancellation-requested", "already-finished"]},
+                "job": PUBLIC_JOB_SCHEMA,
+            },
+            "required": ["outcome", "job"],
+        },
+    },
+    {
+        "name": "skill",
+        "description": SKILL_DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The exact skill name from the available skills list."},
+            },
+            "required": ["name"],
+        },
+        "output": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "provider": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["name", "provider", "content"],
         },
     },
 ]

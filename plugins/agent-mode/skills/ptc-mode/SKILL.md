@@ -5,9 +5,11 @@ description: DeepSeek Harness (DSH) agent preset "ptc" mode for ZCode — progra
 
 # PTC mode (DeepSeek Harness agent preset)
 
+You are a coding agent powered by the current session's model.
+
 `run_code` is the only tool you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.
 
-ZCode exposes the reserved transport as **`mcp__plugin_agent-mode_agent-mode__run_code`** (plugin-prefixed MCP naming). A direct call to any other tool is rejected before policy with: `only \`run_code\` is callable directly — call \`<name>\` from inside a \`run_code\` program instead`.
+ZCode exposes the reserved transport as **`mcp__plugin_agent-mode_agent-mode__run_code`** (plugin-prefixed MCP naming). A direct call to any other tool is rejected before policy with: `only \`run_code\` is callable directly — call \`<name>\` from inside a \`run_code\` program instead`. Exceptions: `AskUserQuestion` (client-UI interaction) stays directly callable.
 
 ## Transport contract
 
@@ -169,7 +171,11 @@ tools: Tools
 
 ## Registry notes
 
-- The declared bindings are the model-facing surface: `pwsh`, `read`, `write`, `edit`, `glob`, `grep`, `web_fetch` — the DSH `ptc` preset's core shell/file/search/web tools, with DSH's verbatim descriptions and canonical output shapes. Safe (read-only) calls may overlap under `asyncio.gather`; mutating calls (`pwsh`, `write`, `edit`) run alone, in submission order.
+- The declared bindings are the model-facing surface: `pwsh`, `read`, `write`, `edit`, `glob`, `grep`, `web_fetch`, `ask_user_question`, `todo_write`, `job_output`, `job_list`, `job_kill`, `skill` — the DSH `ptc` preset's tool roster with DSH's verbatim descriptions and canonical output shapes. Safe (read-only) calls may overlap under `asyncio.gather`; mutating and user-blocking calls (`pwsh`, `write`, `edit`, `ask_user_question`, `todo_write`, `job_kill`) run alone, in submission order.
+- **Background jobs** (`pwsh` with `run_in_background`, or a timeout that promotes the command instead of killing it): DSH `tool:jobs` policy applies verbatim — Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job's work. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering.
+- **`ask_user_question`** blocks inside the program when the client supports MCP elicitation (the answer batch becomes the binding value, DSH legacy contract); without elicitation support it returns DSH's timed-mode pending shape — ask the user directly afterwards, and their reply is the answer.
+- **`skill`** loads a skill's full SKILL.md body by exact name (DSH tool-skill contract); the session's skill catalog comes from ZCode natively.
+- **Mode state is per session** (like DSH session modes): switching writes `{"mode": ..., "owner": "<session id>"}` — the session id comes from the "Agent Mode session" banner in the injected context. Another session's switch never leaks into this one.
 - **User interaction exception**: `AskUserQuestion` stays DIRECTLY callable in PTC mode (a deviation from DSH, where `ask_user_question` is an SDK binding). An MCP server cannot open ZCode's question dialog, so the client-UI tool is the only channel; all work still flows through `run_code`.
 - **Projected MCP bindings**: like DSH, the registry binds every agent-visible tool — the tools of the MCP servers configured in ZCode (user/workspace scope) are projected as additional bindings and listed at the top of each session ("PTC projected MCP bindings"). Call them by bare name (`await tools.get_me({})`) or subscript; their arguments come lossless-JSON as plain dict/list (the projected list names each tool's required args). They classify FAIL-CLOSED EXCLUSIVE (DSH's rule for undeclared tools): they run alone, in submission order, never overlapping. A server that cannot be reached is skipped and noted in the same context block; servers whose commands carry unresolvable `${...}` plugin placeholders are skipped too.
 - On a POSIX host the shell binding is `bash` instead of `pwsh` (the DSH preset disables `tool-bash` on win32 and `tool-pwsh` elsewhere); this host ships the Windows roster.

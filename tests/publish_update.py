@@ -85,7 +85,7 @@ def main() -> int:
     parent = api("GET", f"/repos/{OWNER}/{REPO_NAME}/git/commits/{parent_sha}")
     tree = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/trees", {"base_tree": parent["tree"]["sha"], "tree": tree_entries})
     commit = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/commits", {
-        "message": "v0.2.1: keep AskUserQuestion directly callable in PTC/minimal modes (read-only client-UI interaction; an MCP binding cannot open the question dialog) — documented as a deliberate DSH deviation",
+        "message": "v0.3.0: one-shot DSH PTC-fidelity port — MCP-elicitation ask_user_question (DSH legacy + timed-pending fallback), todo_write, background jobs (job_output/job_list/job_kill, pwsh run_in_background + promoteOnTimeout), skill binding, per-session mode state (owner-stamped), time-context + persona in PTC context; bidirectional MCP transport",
         "tree": tree["sha"],
         "parents": [parent_sha],
     })
