@@ -58,8 +58,15 @@ def is_mode_skill(tool_input: object) -> bool:
 # User-interaction tools stay directly callable: AskUserQuestion is a pure
 # read-only client-UI capability that no MCP binding can reach (an MCP server
 # cannot open ZCode's question dialog), so blocking it would only degrade UX.
+# Agent/Task delegation is likewise meta-work: DSH's tool-subagent needs the
+# host agent runtime, which an MCP binding cannot reach, so ZCode's native
+# subagent tool is the only channel — its synchronous result matches DSH's
+# subagent_fork contract ("You receive its result, not its intermediate steps").
 # Work still flows exclusively through run_code; this mirrors DSH's intent.
-DIRECT_INTERACTION_TOOLS = {"AskUserQuestion"}
+DIRECT_INTERACTION_TOOLS = {"AskUserQuestion", "Agent", "Task"}
+# Minimal mode has no delegation channel in DSH's roster — only the read-only
+# user-interaction tool stays exempt there.
+MINIMAL_INTERACTION_TOOLS = {"AskUserQuestion"}
 
 
 PTC_CONTEXT = (
@@ -69,7 +76,8 @@ PTC_CONTEXT = (
     f"`{RUN_CODE_TOOL}`. Reach every tool the SDK declares in the agent-mode:ptc-mode "
     "skill from inside the program as `await tools.name(args)`; only printed values "
     "and the returned value become program output. Exceptions: `AskUserQuestion` "
-    "stays directly callable for user interaction."
+    "(user interaction) and `Agent`/`Task` (subagent delegation, synchronous like "
+    "DSH's subagent_fork) stay directly callable."
 )
 
 # DSH time-context: a standing prompt section carrying the current date/time.
@@ -299,7 +307,7 @@ def handle_pre_tool_use() -> None:
     if mode == "minimal":
         if tool_name == "Bash":
             return
-        if tool_name in DIRECT_INTERACTION_TOOLS:
+        if tool_name in MINIMAL_INTERACTION_TOOLS:
             return
         if tool_name == "Skill" and is_mode_skill(tool_input):
             return
